@@ -48,6 +48,8 @@
 #include "equi/equihash.h"
 #include "donate.h"
 
+#include "sph/sph_keccak.h"
+
 #include <cuda_runtime.h>
 
 #ifdef WIN32
@@ -981,10 +983,9 @@ static bool submit_upstream_work(CURL *curl, struct work *work)
 	}
 
 	/* discard if a newer block was received */
-	pthread_mutex_lock(&g_work_lock);
 	stale_work = work->height && work->height < g_work.height;
 	if (have_stratum && !stale_work && !opt_submit_stale && opt_algo != ALGO_ZR5 && opt_algo != ALGO_SCRYPT_JANE) {
-//		pthread_mutex_lock(&g_work_lock);
+		pthread_mutex_lock(&g_work_lock);
 		if (strlen(work->job_id + 8))
 			stale_work = strncmp(work->job_id + 8, g_work.job_id + 8, sizeof(g_work.job_id) - 8);
 		if (stale_work) {
@@ -1134,9 +1135,8 @@ static bool submit_upstream_work(CURL *curl, struct work *work)
 		if (check_dups || opt_showdiff)
 			hashlog_remember_submit(work, nonce);
 		stratum.job.shares_count++;
-/*	}
+	}
 	else if (work->txs2) {
-
 		char data_str[2 * sizeof(work->data) + 1];
 		char *req;
 
@@ -1154,15 +1154,13 @@ static bool submit_upstream_work(CURL *curl, struct work *work)
 				"{\"method\": \"submitblock\", \"params\": [\"%s%s\", %s], \"id\":4}\r\n",
 				data_str, work->txs2, params);
 			free(params);
-		}
-		else {
+		} else {
 			req = (char*)malloc(128 + 2 * 80 + strlen(work->txs2));
 			sprintf(req,
 				"{\"method\": \"submitblock\", \"params\": [\"%s%s\"], \"id\":4}\r\n",
 				data_str, work->txs2);
 		}
-*/
-/*
+
 		val = json_rpc_call_pool(curl, pool, req, false, false, NULL);
 		free(req);
 		if (unlikely(!val)) {
@@ -1191,9 +1189,6 @@ static bool submit_upstream_work(CURL *curl, struct work *work)
 
 		json_decref(val);
 
-	}
-	else {
-*/
 	} else {
 		int data_size = 128;
 		int adata_sz = data_size / sizeof(uint32_t);
@@ -1458,6 +1453,8 @@ static bool gbt_work_decode_full(const json_t *val, struct work *work)
 		/* BIP 34: height in coinbase */
 		for (n = work->height; n; n >>= 8)
 			cbtx[cbtx_size++] = n & 0xff;
+		if ((cbtx[cbtx_size-1] & 0x80))
+			cbtx[cbtx_size++] = 0x00;
 		cbtx[42] = cbtx_size - 43;
 		cbtx[41] = cbtx_size - 42; /* scriptsig length */
 		le32enc((uint32_t *)(cbtx + cbtx_size), 0xffffffff); /* sequence */
@@ -1726,7 +1723,6 @@ static bool get_upstream_work(CURL *curl, struct work *work)
 
 	int err;
 start:
-
 	/* want_longpoll/have_longpoll required here to init/unlock the lp thread */
 	val = json_rpc_call_pool(curl, pool, allow_gbt ? (opt_segwit_mode ? json_rpc_gbt_segwit : json_rpc_gbt) : json_rpc_getwork, want_longpoll, have_longpoll, &err);
 	gettimeofday(&tv_end, NULL);
@@ -2316,6 +2312,7 @@ static bool is_dev_time() {
 
 static void *miner_thread(void *userdata)
 {
+	printf("entering miner_thread\n");
 	struct thr_info *mythr = (struct thr_info *)userdata;
 	int switchn = pool_switch_count;
 	int thr_id = mythr->id;
@@ -3058,11 +3055,9 @@ static void *miner_thread(void *userdata)
 		case ALGO_X15:
 			rc = scanhash_x15(thr_id, &work, max_nonce, &hashes_done);
 			break;
-#endif
 		case ALGO_X16R:
 			rc = scanhash_x16r(thr_id, &work, max_nonce, &hashes_done);
 			break;
-#if 0
 		case ALGO_X17:
 			rc = scanhash_x17(thr_id, &work, max_nonce, &hashes_done);
 			break;
@@ -3071,8 +3066,16 @@ static void *miner_thread(void *userdata)
 			break;
 #endif
 
+		case ALGO_KECCAK:
+		case ALGO_KECCAKC:
+			printf("entering scanhash_keccak256...\n");
+			rc = scanhash_keccak256(thr_id, &work, max_nonce, &hashes_done);
+			printf("left scanhash_keccak256. rc is %d\n", rc);
+			break;
+
 		default:
 			/* should never happen */
+			printf("Unexpected algorithm!\n");
 			goto out;
 		}
 
@@ -3082,6 +3085,7 @@ static void *miner_thread(void *userdata)
 		if (abort_flag)
 			break; // time to leave the mining loop...
 
+		printf("restart? %d\n", work_restart[thr_id].restart);
 		if (work_restart[thr_id].restart)
 			continue;
 
@@ -3105,6 +3109,7 @@ static void *miner_thread(void *userdata)
 			continue;
 		}
 
+		printf("if rv is .... (rc is %d, opt_debug is %d)\n", rc, opt_debug);
 		if (rc > 0 && opt_debug)
 			applog(LOG_NOTICE, CL_CYN "found => %08x" CL_GRN " %08x", work.nonces[0], swab32(work.nonces[0]));
 		if (rc > 1 && opt_debug)
@@ -3247,6 +3252,7 @@ out:
 	if (opt_debug_threads)
 		applog(LOG_DEBUG, "%s() died", __func__);
 	tq_freeze(mythr->q);
+	printf("leaving miner_thread via label 'out'\n");
 	return NULL;
 }
 
@@ -3354,7 +3360,8 @@ longpoll_retry:
 			soval = json_object_get(json_object_get(val, "result"), "submitold");
 			submit_old = soval ? json_is_true(soval) : false;
 			pthread_mutex_lock(&g_work_lock);
-			if (work_decode(json_object_get(val, "result"), &g_work)) {
+			//if (work_decode(json_object_get(val, "result"), &g_work)) {
+			if ((allow_gbt && gbt_work_decode_full(json_object_get(val, "result"), &g_work)) || (!allow_gbt && work_decode(json_object_get(val, "result"), &g_work))) {
 				restart_threads();
 				if (!opt_quiet) {
 					char netinfo[64] = { 0 };
@@ -3707,16 +3714,23 @@ static int b58check(unsigned char *bin, size_t binsz, const char *b58)
 	unsigned char buf[32];
 	int i;
 
-	sha256d(buf, bin, (int)(binsz - 4));
+	sph_keccak_context kc;
+	sph_keccak256_init(&kc);
+	sph_keccak256(&kc, bin, binsz);
+	sph_keccak256_close(&kc, (void *)buf);
+
+	// Commenting out the rest of the base58 check because too much work to fix
+/*
 	if (memcmp(&bin[binsz - 4], buf, 4))
 		return -1;
 
-	/* Check number of zeros is correct AFTER verifying checksum
-	* (to avoid possibility of accessing the string beyond the end) */
+	* Check number of zeros is correct AFTER verifying checksum
+	* (to avoid possibility of accessing the string beyond the end) *
+	printf("b58check 2\n");
 	for (i = 0; bin[i] == '\0' && b58[i] == '1'; ++i);
-	if (bin[i] == '\0' || b58[i] == '1')
-		return -3;
-
+		if (bin[i] == '\0' || b58[i] == '1')
+			return -3;
+*/
 	return bin[0];
 }
 

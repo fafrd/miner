@@ -1,4 +1,3 @@
-#if 0
 /*
  * Keccak 256
  *
@@ -110,7 +109,8 @@ extern "C" int scanhash_keccak256(int thr_id, struct work* work, uint32_t max_no
 			keccak256_cpu_hash_80(thr_id, throughput, pdata[19], work->nonces, highTarget);
 		}
 
-		if (work->nonces[0] != UINT32_MAX && bench_algo < 0)
+		//if (work->nonces[0] != UINT32_MAX && bench_algo < 0)
+		if (work->nonces[0] != UINT32_MAX)
 		{
 			const uint32_t Htarg = ptarget[7];
 			uint32_t _ALIGN(64) vhash[8];
@@ -174,4 +174,3 @@ extern "C" void free_keccak256(int thr_id)
 	cudaDeviceSynchronize();
 	init[thr_id] = false;
 }
-#endif
